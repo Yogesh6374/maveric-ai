@@ -1,5 +1,7 @@
 import os
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+import requests
+
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr
 from typing import Optional
@@ -8,29 +10,53 @@ from datetime import datetime, timedelta
 from app.database import SessionLocal
 from app import models, auth
 
-router = APIRouter(prefix="/api/v1/auth", tags=["Authentication"])
 
-# ── simple in-memory OTP rate limiter (per email, per process) ────────────────
+router = APIRouter(
+    prefix="/api/v1/auth",
+    tags=["Authentication"],
+)
+
+
+# ============================================================
+# OTP RATE LIMITING
+# ============================================================
+
 _otp_attempts: dict[str, list[datetime]] = {}
 _OTP_MAX_PER_HOUR = 5
+
 _DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 
 
 def _check_otp_rate_limit(email: str) -> None:
+    """
+    Limit password-reset OTP requests to 5 per hour per email.
+    """
+
     now = datetime.utcnow()
     window = now - timedelta(hours=1)
-    attempts = [t for t in _otp_attempts.get(email, []) if t > window]
+
+    attempts = [
+        t
+        for t in _otp_attempts.get(email, [])
+        if t > window
+    ]
+
     if len(attempts) >= _OTP_MAX_PER_HOUR:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many OTP requests. Please wait before trying again.",
         )
+
     _otp_attempts[email] = attempts + [now]
 
 
-# ── DB dependency ─────────────────────────────────────────────────────────────
+# ============================================================
+# DATABASE DEPENDENCY
+# ============================================================
+
 def get_db():
     db = SessionLocal()
+
     try:
         yield db
     finally:
@@ -38,7 +64,7 @@ def get_db():
 
 
 # ============================================================
-# SCHEMAS
+# REQUEST SCHEMAS
 # ============================================================
 
 class RegisterRequest(BaseModel):
@@ -72,7 +98,7 @@ class ForgotPasswordVerifyOTPRequest(BaseModel):
 
 
 class ResetPasswordRequest(BaseModel):
-    reset_token: str   # signed JWT issued after OTP verify
+    reset_token: str
     new_password: str
 
 
@@ -81,12 +107,24 @@ class RefreshTokenRequest(BaseModel):
 
 
 # ============================================================
-# HELPERS
+# AUTH RESPONSE HELPER
 # ============================================================
 
 def _build_auth_response(user: models.User) -> dict:
-    access_token = auth.create_access_token({"sub": str(user.id), "email": user.email})
-    refresh_token = auth.create_refresh_token({"sub": str(user.id), "email": user.email})
+    access_token = auth.create_access_token(
+        {
+            "sub": str(user.id),
+            "email": user.email,
+        }
+    )
+
+    refresh_token = auth.create_refresh_token(
+        {
+            "sub": str(user.id),
+            "email": user.email,
+        }
+    )
+
     return {
         "user_id": user.id,
         "name": user.name,
@@ -100,12 +138,23 @@ def _build_auth_response(user: models.User) -> dict:
 
 
 # ============================================================
-# ENDPOINTS
+# REGISTER
 # ============================================================
 
-@router.post("/register", status_code=status.HTTP_201_CREATED)
-def register(request: RegisterRequest, db: Session = Depends(get_db)):
-    existing = db.query(models.User).filter(models.User.email == request.email).first()
+@router.post(
+    "/register",
+    status_code=status.HTTP_201_CREATED,
+)
+def register(
+    request: RegisterRequest,
+    db: Session = Depends(get_db),
+):
+    existing = (
+        db.query(models.User)
+        .filter(models.User.email == request.email)
+        .first()
+    )
+
     if existing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -124,42 +173,83 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
         password_hash=auth.hash_password(request.password),
         google_id=None,
     )
+
     db.add(user)
     db.commit()
     db.refresh(user)
+
     return _build_auth_response(user)
 
 
+# ============================================================
+# LOGIN
+# ============================================================
+
 @router.post("/login")
-def login(request: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.email == request.email).first()
-    if not user or not user.password_hash or not auth.verify_password(request.password, user.password_hash):
+def login(
+    request: LoginRequest,
+    db: Session = Depends(get_db),
+):
+    user = (
+        db.query(models.User)
+        .filter(models.User.email == request.email)
+        .first()
+    )
+
+    if (
+        not user
+        or not user.password_hash
+        or not auth.verify_password(
+            request.password,
+            user.password_hash,
+        )
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
 
-    # Transparently upgrade legacy PBKDF2 hashes to bcrypt on first login
+    # Upgrade legacy PBKDF2 hashes to bcrypt.
     if auth.needs_rehash(user.password_hash):
-        user.password_hash = auth.hash_password(request.password)
+        user.password_hash = auth.hash_password(
+            request.password
+        )
         db.commit()
 
     return _build_auth_response(user)
 
 
+# ============================================================
+# GOOGLE AUTHENTICATION
+# ============================================================
 
 @router.post("/google")
-def google_auth(request: GoogleAuthRequest, db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.email == request.email).first()
+def google_auth(
+    request: GoogleAuthRequest,
+    db: Session = Depends(get_db),
+):
+    user = (
+        db.query(models.User)
+        .filter(models.User.email == request.email)
+        .first()
+    )
 
     if user:
+
+        # Link Google account if not already linked.
         if not user.google_id:
             user.google_id = request.google_id
+
+        # Update profile photo when supplied.
         if request.profile_photo:
             user.profile_photo = request.profile_photo
+
         db.commit()
         db.refresh(user)
+
     else:
+
+        # Create a Google-only account.
         user = models.User(
             name=request.name.strip(),
             email=request.email,
@@ -167,6 +257,7 @@ def google_auth(request: GoogleAuthRequest, db: Session = Depends(get_db)):
             google_id=request.google_id,
             profile_photo=request.profile_photo,
         )
+
         db.add(user)
         db.commit()
         db.refresh(user)
@@ -174,77 +265,311 @@ def google_auth(request: GoogleAuthRequest, db: Session = Depends(get_db)):
     return _build_auth_response(user)
 
 
-@router.post("/forgot-password/request-otp")
-def request_otp(request: ForgotPasswordOTPRequest, db: Session = Depends(get_db)):
-    # Rate limiting
-    _check_otp_rate_limit(request.email)
+# ============================================================
+# FORGOT PASSWORD — REQUEST OTP
+# ============================================================
 
-    user = db.query(models.User).filter(models.User.email == request.email).first()
+@router.post("/forgot-password/request-otp")
+def request_otp(
+    request: ForgotPasswordOTPRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Generate and send a password-reset OTP.
+
+    IMPORTANT:
+    Uses Resend HTTPS API instead of SMTP.
+    This works with Render Free because it does not connect
+    to Gmail SMTP ports 25/465/587.
+    """
+
+    email = request.email.strip().lower()
+
+    # --------------------------------------------------------
+    # Rate limiting
+    # --------------------------------------------------------
+
+    _check_otp_rate_limit(email)
+
+    # --------------------------------------------------------
+    # Check account
+    # --------------------------------------------------------
+
+    user = (
+        db.query(models.User)
+        .filter(models.User.email == email)
+        .first()
+    )
+
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No account found with this email address",
         )
 
+    # --------------------------------------------------------
+    # Generate OTP
+    # --------------------------------------------------------
+
     otp_code = auth.generate_otp(6)
-    expires_at = datetime.utcnow() + timedelta(minutes=10)
+
+    expires_at = datetime.utcnow() + timedelta(
+        minutes=10
+    )
+
+    # --------------------------------------------------------
+    # Store OTP
+    # --------------------------------------------------------
 
     otp_token = models.OTPToken(
-        email=request.email,
+        email=email,
         otp_code=otp_code,
         expires_at=expires_at,
         is_used=False,
     )
+
     db.add(otp_token)
     db.commit()
 
-    # Send OTP via email using SMTP
-    import smtplib
-    from email.mime.text import MIMEText
-    
-    smtp_host = os.getenv("SMTP_HOST", "")
-    smtp_port = int(os.getenv("SMTP_PORT", "587"))
-    smtp_user = os.getenv("SMTP_USERNAME", "")
-    smtp_pass = os.getenv("SMTP_PASSWORD", "")
-    
-    if smtp_host and smtp_user and smtp_pass:
-        try:
-            msg = MIMEText(f"Your Maveric AI password reset OTP is: {otp_code}\nThis code will expire in 10 minutes.")
-            msg['Subject'] = 'Maveric AI Password Reset OTP'
-            msg['From'] = smtp_user
-            msg['To'] = request.email
-            
-            with smtplib.SMTP(smtp_host, smtp_port) as server:
-                server.starttls()
-                server.login(smtp_user, smtp_pass)
-                server.send_message(msg)
-        except Exception as e:
-            # Fallback for dev if email fails
-            print(f"Failed to send email: {e}. OTP for {request.email} is: {otp_code}")
-    else:
-        # Fallback if no SMTP configured
-        print(f"SMTP not configured. Dev OTP for {request.email} is: {otp_code}")
+    # --------------------------------------------------------
+    # Resend configuration
+    # --------------------------------------------------------
 
-    response: dict = {
+    resend_api_key = os.getenv(
+        "RESEND_API_KEY",
+        "",
+    ).strip()
+
+    from_email = os.getenv(
+        "FROM_EMAIL",
+        "onboarding@resend.dev",
+    ).strip()
+
+    if not resend_api_key:
+        # Do NOT silently return SUCCESS.
+        # The old code did this when SMTP wasn't configured.
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Email service is not configured. Please contact the administrator.",
+        )
+
+    # --------------------------------------------------------
+    # Email HTML
+    # --------------------------------------------------------
+
+    email_html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Maveric AI Password Reset</title>
+</head>
+
+<body style="
+    margin: 0;
+    padding: 0;
+    background: #f4f4f7;
+    font-family: Arial, Helvetica, sans-serif;
+">
+
+    <div style="
+        max-width: 600px;
+        margin: 40px auto;
+        background: #ffffff;
+        border-radius: 16px;
+        padding: 40px;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+    ">
+
+        <h1 style="
+            margin-top: 0;
+            color: #6C5CE7;
+            text-align: center;
+        ">
+            Maveric AI
+        </h1>
+
+        <h2 style="
+            color: #222222;
+            text-align: center;
+        ">
+            Password Reset
+        </h2>
+
+        <p style="
+            color: #555555;
+            font-size: 16px;
+            line-height: 1.6;
+        ">
+            We received a request to reset your Maveric AI password.
+        </p>
+
+        <p style="
+            color: #555555;
+            font-size: 16px;
+            line-height: 1.6;
+        ">
+            Your one-time password is:
+        </p>
+
+        <div style="
+            margin: 30px 0;
+            padding: 20px;
+            background: #f1efff;
+            border-radius: 12px;
+            text-align: center;
+        ">
+
+            <span style="
+                font-size: 34px;
+                font-weight: bold;
+                letter-spacing: 10px;
+                color: #6C5CE7;
+            ">
+                {otp_code}
+            </span>
+
+        </div>
+
+        <p style="
+            color: #555555;
+            font-size: 15px;
+            line-height: 1.6;
+        ">
+            This OTP is valid for <strong>10 minutes</strong>.
+        </p>
+
+        <p style="
+            color: #777777;
+            font-size: 14px;
+            line-height: 1.6;
+        ">
+            If you did not request a password reset, you can safely ignore
+            this email.
+        </p>
+
+        <hr style="
+            border: none;
+            border-top: 1px solid #eeeeee;
+            margin: 30px 0;
+        ">
+
+        <p style="
+            color: #999999;
+            font-size: 13px;
+            text-align: center;
+        ">
+            — Maveric AI Team
+        </p>
+
+    </div>
+
+</body>
+</html>
+"""
+
+    # --------------------------------------------------------
+    # Send using Resend HTTPS API
+    # --------------------------------------------------------
+
+    try:
+
+        response = requests.post(
+            "https://api.resend.com/emails",
+
+            headers={
+                "Authorization": f"Bearer {resend_api_key}",
+                "Content-Type": "application/json",
+            },
+
+            json={
+                "from": from_email,
+                "to": [email],
+                "subject": "Maveric AI Password Reset OTP",
+                "html": email_html,
+            },
+
+            timeout=10,
+        )
+
+    except requests.RequestException as exc:
+
+        print(
+            f"[Resend] Connection error: {exc}"
+        )
+
+        # Remove the unused OTP so the user can request
+        # a fresh one.
+        try:
+            db.delete(otp_token)
+            db.commit()
+        except Exception:
+            db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Email service is temporarily unavailable. Please try again later.",
+        )
+
+    # --------------------------------------------------------
+    # Validate Resend response
+    # --------------------------------------------------------
+
+    if response.status_code not in (200, 201):
+
+        print(
+            "[Resend] Email failed: "
+            f"status={response.status_code}, "
+            f"response={response.text}"
+        )
+
+        # Do not leave an unusable OTP in the database.
+        try:
+            db.delete(otp_token)
+            db.commit()
+        except Exception:
+            db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Unable to send OTP email. Please try again later.",
+        )
+
+    print(
+        f"[Resend] Password reset OTP sent successfully "
+        f"to {email}"
+    )
+
+    return {
         "status": "SUCCESS",
         "message": "OTP sent to your email address",
-        "email": request.email,
+        "email": email,
     }
-    
-    return response
 
+
+# ============================================================
+# FORGOT PASSWORD — VERIFY OTP
+# ============================================================
 
 @router.post("/forgot-password/verify-otp")
-def verify_otp(request: ForgotPasswordVerifyOTPRequest, db: Session = Depends(get_db)):
+def verify_otp(
+    request: ForgotPasswordVerifyOTPRequest,
+    db: Session = Depends(get_db),
+):
+    email = request.email.strip().lower()
+    otp = request.otp.strip()
+
     record = (
         db.query(models.OTPToken)
         .filter(
-            models.OTPToken.email == request.email,
-            models.OTPToken.otp_code == request.otp,
+            models.OTPToken.email == email,
+            models.OTPToken.otp_code == otp,
             models.OTPToken.is_used == False,
             models.OTPToken.expires_at > datetime.utcnow(),
         )
-        .order_by(models.OTPToken.id.desc())
+        .order_by(
+            models.OTPToken.id.desc()
+        )
         .first()
     )
 
@@ -254,11 +579,13 @@ def verify_otp(request: ForgotPasswordVerifyOTPRequest, db: Session = Depends(ge
             detail="Invalid or expired OTP",
         )
 
+    # Mark OTP as used.
     record.is_used = True
     db.commit()
 
-    # Issue a short-lived signed reset token — required by reset-password endpoint
-    reset_token = auth.create_reset_token(request.email)
+    # Create a short-lived reset token.
+    reset_token = auth.create_reset_token(email)
+
     return {
         "status": "SUCCESS",
         "message": "OTP verified successfully",
@@ -266,16 +593,36 @@ def verify_otp(request: ForgotPasswordVerifyOTPRequest, db: Session = Depends(ge
     }
 
 
+# ============================================================
+# FORGOT PASSWORD — RESET PASSWORD
+# ============================================================
+
 @router.post("/forgot-password/reset-password")
-def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db)):
-    # Validate the reset token (signed JWT, expires in 15 min)
+def reset_password(
+    request: ResetPasswordRequest,
+    db: Session = Depends(get_db),
+):
+    # --------------------------------------------------------
+    # Validate reset token
+    # --------------------------------------------------------
+
     try:
-        payload = auth.decode_token(request.reset_token)
+        payload = auth.decode_token(
+            request.reset_token
+        )
+
     except HTTPException:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired reset token. Please request a new OTP.",
+            detail=(
+                "Invalid or expired reset token. "
+                "Please request a new OTP."
+            ),
         )
+
+    # --------------------------------------------------------
+    # Make sure this is a password-reset token
+    # --------------------------------------------------------
 
     if payload.get("type") != "reset":
         raise HTTPException(
@@ -284,8 +631,16 @@ def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db))
         )
 
     email = payload.get("email")
+
     if not email:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid reset token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid reset token",
+        )
+
+    # --------------------------------------------------------
+    # Validate password
+    # --------------------------------------------------------
 
     if len(request.new_password) < 6:
         raise HTTPException(
@@ -293,19 +648,50 @@ def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db))
             detail="Password must be at least 6 characters",
         )
 
-    user = db.query(models.User).filter(models.User.email == email).first()
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    # --------------------------------------------------------
+    # Find user
+    # --------------------------------------------------------
 
-    user.password_hash = auth.hash_password(request.new_password)
+    user = (
+        db.query(models.User)
+        .filter(models.User.email == email)
+        .first()
+    )
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    # --------------------------------------------------------
+    # Save new password
+    # --------------------------------------------------------
+
+    user.password_hash = auth.hash_password(
+        request.new_password
+    )
+
     db.commit()
 
-    return {"status": "SUCCESS", "message": "Password reset successfully"}
+    return {
+        "status": "SUCCESS",
+        "message": "Password reset successfully",
+    }
 
+
+# ============================================================
+# REFRESH TOKEN
+# ============================================================
 
 @router.post("/refresh")
-def refresh_token(request: RefreshTokenRequest):
-    payload = auth.decode_token(request.refresh_token)
+def refresh_token(
+    request: RefreshTokenRequest,
+):
+    payload = auth.decode_token(
+        request.refresh_token
+    )
+
     if payload.get("type") != "refresh":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -315,17 +701,48 @@ def refresh_token(request: RefreshTokenRequest):
     user_id = payload.get("sub")
     email = payload.get("email")
 
-    new_access_token = auth.create_access_token({"sub": user_id, "email": email})
-    return {"access_token": new_access_token, "token_type": "bearer"}
+    new_access_token = auth.create_access_token(
+        {
+            "sub": user_id,
+            "email": email,
+        }
+    )
 
+    return {
+        "access_token": new_access_token,
+        "token_type": "bearer",
+    }
+
+
+# ============================================================
+# CURRENT USER
+# ============================================================
 
 @router.get("/me")
-def get_me(user_id: Optional[int] = Depends(auth.get_current_user_id), db: Session = Depends(get_db)):
+def get_me(
+    user_id: Optional[int] = Depends(
+        auth.get_current_user_id
+    ),
+    db: Session = Depends(get_db),
+):
     if user_id is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
-    user = db.query(models.User).filter(models.User.id == user_id).first()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+        )
+
+    user = (
+        db.query(models.User)
+        .filter(models.User.id == user_id)
+        .first()
+    )
+
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
     return {
         "user_id": user.id,
         "name": user.name,
