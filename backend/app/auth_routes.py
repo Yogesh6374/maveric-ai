@@ -1,5 +1,6 @@
 import os
-import requests
+import smtplib
+from email.mime.text import MIMEText
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -275,12 +276,13 @@ def request_otp(
     db: Session = Depends(get_db),
 ):
     """
-    Generate and send a password-reset OTP.
+    Generate and send a password-reset OTP using Gmail SMTP.
 
-    IMPORTANT:
-    Uses Resend HTTPS API instead of SMTP.
-    This works with Render Free because it does not connect
-    to Gmail SMTP ports 25/465/587.
+    Required environment variables:
+        SMTP_HOST=smtp.gmail.com
+        SMTP_PORT=587
+        SMTP_USERNAME=<Gmail address>
+        SMTP_PASSWORD=<Gmail App Password>
     """
 
     email = request.email.strip().lower()
@@ -312,10 +314,7 @@ def request_otp(
     # --------------------------------------------------------
 
     otp_code = auth.generate_otp(6)
-
-    expires_at = datetime.utcnow() + timedelta(
-        minutes=10
-    )
+    expires_at = datetime.utcnow() + timedelta(minutes=10)
 
     # --------------------------------------------------------
     # Store OTP
@@ -332,22 +331,21 @@ def request_otp(
     db.commit()
 
     # --------------------------------------------------------
-    # Resend configuration
+    # Gmail SMTP configuration
     # --------------------------------------------------------
 
-    resend_api_key = os.getenv(
-        "RESEND_API_KEY",
-        "",
-    ).strip()
+    smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_username = os.getenv("SMTP_USERNAME", "").strip()
+    smtp_password = os.getenv("SMTP_PASSWORD", "").strip()
 
-    from_email = os.getenv(
-        "FROM_EMAIL",
-        "onboarding@resend.dev",
-    ).strip()
+    if not smtp_username or not smtp_password:
+        try:
+            db.delete(otp_token)
+            db.commit()
+        except Exception:
+            db.rollback()
 
-    if not resend_api_key:
-        # Do NOT silently return SUCCESS.
-        # The old code did this when SMTP wasn't configured.
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Email service is not configured. Please contact the administrator.",
@@ -364,166 +362,112 @@ def request_otp(
     <meta charset="UTF-8">
     <title>Maveric AI Password Reset</title>
 </head>
-
 <body style="
-    margin: 0;
-    padding: 0;
-    background: #f4f4f7;
-    font-family: Arial, Helvetica, sans-serif;
+    margin:0;
+    padding:0;
+    background:#f4f4f7;
+    font-family:Arial,Helvetica,sans-serif;
 ">
-
     <div style="
-        max-width: 600px;
-        margin: 40px auto;
-        background: #ffffff;
-        border-radius: 16px;
-        padding: 40px;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+        max-width:600px;
+        margin:40px auto;
+        background:#ffffff;
+        border-radius:16px;
+        padding:40px;
+        box-shadow:0 4px 20px rgba(0,0,0,0.08);
     ">
-
         <h1 style="
-            margin-top: 0;
-            color: #6C5CE7;
-            text-align: center;
+            margin-top:0;
+            color:#6C5CE7;
+            text-align:center;
         ">
             Maveric AI
         </h1>
 
-        <h2 style="
-            color: #222222;
-            text-align: center;
-        ">
+        <h2 style="color:#222222;text-align:center;">
             Password Reset
         </h2>
 
-        <p style="
-            color: #555555;
-            font-size: 16px;
-            line-height: 1.6;
-        ">
+        <p style="color:#555555;font-size:16px;line-height:1.6;">
             We received a request to reset your Maveric AI password.
         </p>
 
-        <p style="
-            color: #555555;
-            font-size: 16px;
-            line-height: 1.6;
-        ">
+        <p style="color:#555555;font-size:16px;line-height:1.6;">
             Your one-time password is:
         </p>
 
         <div style="
-            margin: 30px 0;
-            padding: 20px;
-            background: #f1efff;
-            border-radius: 12px;
-            text-align: center;
+            margin:30px 0;
+            padding:20px;
+            background:#f1efff;
+            border-radius:12px;
+            text-align:center;
         ">
-
             <span style="
-                font-size: 34px;
-                font-weight: bold;
-                letter-spacing: 10px;
-                color: #6C5CE7;
+                font-size:34px;
+                font-weight:bold;
+                letter-spacing:10px;
+                color:#6C5CE7;
             ">
                 {otp_code}
             </span>
-
         </div>
 
-        <p style="
-            color: #555555;
-            font-size: 15px;
-            line-height: 1.6;
-        ">
+        <p style="color:#555555;font-size:15px;line-height:1.6;">
             This OTP is valid for <strong>10 minutes</strong>.
         </p>
 
-        <p style="
-            color: #777777;
-            font-size: 14px;
-            line-height: 1.6;
-        ">
+        <p style="color:#777777;font-size:14px;line-height:1.6;">
             If you did not request a password reset, you can safely ignore
             this email.
         </p>
 
         <hr style="
-            border: none;
-            border-top: 1px solid #eeeeee;
-            margin: 30px 0;
+            border:none;
+            border-top:1px solid #eeeeee;
+            margin:30px 0;
         ">
 
         <p style="
-            color: #999999;
-            font-size: 13px;
-            text-align: center;
+            color:#999999;
+            font-size:13px;
+            text-align:center;
         ">
             — Maveric AI Team
         </p>
-
     </div>
-
 </body>
 </html>
 """
 
     # --------------------------------------------------------
-    # Send using Resend HTTPS API
+    # Send using Gmail SMTP
     # --------------------------------------------------------
 
     try:
+        msg = MIMEText(email_html, "html", "utf-8")
+        msg["Subject"] = "Maveric AI - Password Reset OTP"
+        msg["From"] = smtp_username
+        msg["To"] = email
 
-        response = requests.post(
-            "https://api.resend.com/emails",
+        with smtplib.SMTP(
+            smtp_host,
+            smtp_port,
+            timeout=20,
+        ) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(smtp_username, smtp_password)
+            server.sendmail(
+                smtp_username,
+                email,
+                msg.as_string(),
+            )
 
-            headers={
-                "Authorization": f"Bearer {resend_api_key}",
-                "Content-Type": "application/json",
-            },
+    except Exception as exc:
+        print(f"[Gmail SMTP] Email failed: {exc}")
 
-            json={
-                "from": from_email,
-                "to": [email],
-                "subject": "Maveric AI Password Reset OTP",
-                "html": email_html,
-            },
-
-            timeout=10,
-        )
-
-    except requests.RequestException as exc:
-
-        print(
-            f"[Resend] Connection error: {exc}"
-        )
-
-        # Remove the unused OTP so the user can request
-        # a fresh one.
-        try:
-            db.delete(otp_token)
-            db.commit()
-        except Exception:
-            db.rollback()
-
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Email service is temporarily unavailable. Please try again later.",
-        )
-
-    # --------------------------------------------------------
-    # Validate Resend response
-    # --------------------------------------------------------
-
-    if response.status_code not in (200, 201):
-
-        print(
-            "[Resend] Email failed: "
-            f"status={response.status_code}, "
-            f"response={response.text}"
-        )
-
-        # Do not leave an unusable OTP in the database.
         try:
             db.delete(otp_token)
             db.commit()
@@ -536,7 +480,7 @@ def request_otp(
         )
 
     print(
-        f"[Resend] Password reset OTP sent successfully "
+        "[Gmail SMTP] Password reset OTP sent successfully "
         f"to {email}"
     )
 
