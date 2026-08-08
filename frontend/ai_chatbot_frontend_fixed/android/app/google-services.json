@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "956090041591",
+    "project_id": "maveric-ai",
+    "storage_bucket": "maveric-ai.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:956090041591:android:61f023ff6d660e2363bff2",
+        "android_client_info": {
+          "package_name": "com.example.ai_chatbot_frontend_fixed"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "956090041591-u8tb7juch0egikk2prib7e8adb806tlj.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.ai_chatbot_frontend_fixed",
+            "certificate_hash": "a15662559345d9e74642c16ce8c22c03c3906ce3"
+          }
+        },
+        {
+          "client_id": "956090041591-mn1ob6rv2dfcvfhb9qnql9fbfb63fq9q.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBdUrvMNgFw6GhHUJoGc6Y7c0fR0gENMdQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "956090041591-mn1ob6rv2dfcvfhb9qnql9fbfb63fq9q.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

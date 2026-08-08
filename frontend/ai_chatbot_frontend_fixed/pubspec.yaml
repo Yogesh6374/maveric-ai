@@ -1,0 +1,61 @@
+name: ai_chatbot_frontend_fixed
+description: "Maveric AI — Production-Ready Flutter Chatbot"
+publish_to: 'none'
+
+version: 1.2.0+1
+
+environment:
+  sdk: ^3.10.4
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # Core
+  http: ^1.1.0
+  uuid: ^4.4.0
+
+  # UI
+  google_fonts: ^8.0.0
+  shimmer: ^3.0.0
+
+  # State / Persistence
+  shared_preferences: ^2.2.2
+
+  # Firebase / Google Sign-In
+  firebase_core: ^3.13.1
+  firebase_auth: ^5.5.4
+  google_sign_in: ^6.2.2
+
+  # File handling
+  image_picker: ^1.1.2
+  file_picker: ^10.3.8
+  path_provider: ^2.1.1
+  open_file: ^3.3.2
+
+  # Permissions
+  permission_handler: ^11.3.1
+  device_info_plus: ^12.3.0
+
+  # URL / Links
+  url_launcher: ^6.2.1
+
+  # Voice / Audio
+  speech_to_text: ^7.3.0
+  record: ^6.1.2
+  audioplayers: ^6.5.1
+
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  assets:
+    - assets/google.png
+  uses-material-design: true
+
+dependency_overrides:
+  speech_to_text: ^7.3.0

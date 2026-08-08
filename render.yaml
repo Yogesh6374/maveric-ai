@@ -1,0 +1,32 @@
+# Render Blueprint — Maveric AI Backend
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Deploy manually via Render Dashboard OR connect this repo and apply the blueprint.
+# Set secret env vars (JWT_SECRET, OLLAMA_API_KEY, SMTP_*) in the Render dashboard.
+
+services:
+  - type: web
+    name: maveric-ai-backend
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: JWT_SECRET
+        generateValue: true
+      - key: OLLAMA_BASE_URL
+        value: https://ollama.com
+      - key: OLLAMA_API_KEY
+        sync: false
+      - key: TEXT_MODEL
+        sync: false
+      - key: VISION_MODEL
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: DEBUG
+        value: "false"
