@@ -1,6 +1,5 @@
 import os
-import smtplib
-from email.mime.text import MIMEText
+import requests
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -276,13 +275,15 @@ def request_otp(
     db: Session = Depends(get_db),
 ):
     """
-    Generate and send a password-reset OTP using Gmail SMTP.
+    Generate and send a password-reset OTP using Brevo's HTTPS API.
+
+    This uses HTTPS instead of SMTP, so it works with Render Free
+    without connecting to blocked SMTP ports.
 
     Required environment variables:
-        SMTP_HOST=smtp.gmail.com
-        SMTP_PORT=587
-        SMTP_USERNAME=<Gmail address>
-        SMTP_PASSWORD=<Gmail App Password>
+        BREVO_API_KEY=<Brevo API key>
+        BREVO_SENDER_EMAIL=<verified Brevo sender email>
+        BREVO_SENDER_NAME=Maveric AI
     """
 
     email = request.email.strip().lower()
@@ -331,15 +332,25 @@ def request_otp(
     db.commit()
 
     # --------------------------------------------------------
-    # Gmail SMTP configuration
+    # Brevo configuration
     # --------------------------------------------------------
 
-    smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com").strip()
-    smtp_port = int(os.getenv("SMTP_PORT", "587"))
-    smtp_username = os.getenv("SMTP_USERNAME", "").strip()
-    smtp_password = os.getenv("SMTP_PASSWORD", "").strip()
+    brevo_api_key = os.getenv(
+        "BREVO_API_KEY",
+        "",
+    ).strip()
 
-    if not smtp_username or not smtp_password:
+    sender_email = os.getenv(
+        "BREVO_SENDER_EMAIL",
+        "",
+    ).strip().lower()
+
+    sender_name = os.getenv(
+        "BREVO_SENDER_NAME",
+        "Maveric AI",
+    ).strip()
+
+    if not brevo_api_key or not sender_email:
         try:
             db.delete(otp_token)
             db.commit()
@@ -362,12 +373,14 @@ def request_otp(
     <meta charset="UTF-8">
     <title>Maveric AI Password Reset</title>
 </head>
+
 <body style="
     margin:0;
     padding:0;
     background:#f4f4f7;
     font-family:Arial,Helvetica,sans-serif;
 ">
+
     <div style="
         max-width:600px;
         margin:40px auto;
@@ -376,6 +389,7 @@ def request_otp(
         padding:40px;
         box-shadow:0 4px 20px rgba(0,0,0,0.08);
     ">
+
         <h1 style="
             margin-top:0;
             color:#6C5CE7;
@@ -384,15 +398,26 @@ def request_otp(
             Maveric AI
         </h1>
 
-        <h2 style="color:#222222;text-align:center;">
+        <h2 style="
+            color:#222222;
+            text-align:center;
+        ">
             Password Reset
         </h2>
 
-        <p style="color:#555555;font-size:16px;line-height:1.6;">
+        <p style="
+            color:#555555;
+            font-size:16px;
+            line-height:1.6;
+        ">
             We received a request to reset your Maveric AI password.
         </p>
 
-        <p style="color:#555555;font-size:16px;line-height:1.6;">
+        <p style="
+            color:#555555;
+            font-size:16px;
+            line-height:1.6;
+        ">
             Your one-time password is:
         </p>
 
@@ -413,11 +438,19 @@ def request_otp(
             </span>
         </div>
 
-        <p style="color:#555555;font-size:15px;line-height:1.6;">
+        <p style="
+            color:#555555;
+            font-size:15px;
+            line-height:1.6;
+        ">
             This OTP is valid for <strong>10 minutes</strong>.
         </p>
 
-        <p style="color:#777777;font-size:14px;line-height:1.6;">
+        <p style="
+            color:#777777;
+            font-size:14px;
+            line-height:1.6;
+        ">
             If you did not request a password reset, you can safely ignore
             this email.
         </p>
@@ -435,38 +468,65 @@ def request_otp(
         ">
             — Maveric AI Team
         </p>
+
     </div>
+
 </body>
 </html>
 """
 
     # --------------------------------------------------------
-    # Send using Gmail SMTP
+    # Send using Brevo HTTPS API
     # --------------------------------------------------------
 
     try:
-        msg = MIMEText(email_html, "html", "utf-8")
-        msg["Subject"] = "Maveric AI - Password Reset OTP"
-        msg["From"] = smtp_username
-        msg["To"] = email
+        response = requests.post(
+            "https://api.brevo.com/v3/smtp/email",
+            headers={
+                "accept": "application/json",
+                "api-key": brevo_api_key,
+                "content-type": "application/json",
+            },
+            json={
+                "sender": {
+                    "name": sender_name,
+                    "email": sender_email,
+                },
+                "to": [
+                    {
+                        "email": email,
+                    }
+                ],
+                "subject": "Maveric AI - Password Reset OTP",
+                "htmlContent": email_html,
+            },
+            timeout=15,
+        )
 
-        with smtplib.SMTP(
-            smtp_host,
-            smtp_port,
-            timeout=20,
-        ) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(smtp_username, smtp_password)
-            server.sendmail(
-                smtp_username,
-                email,
-                msg.as_string(),
-            )
+    except requests.RequestException as exc:
+        print(f"[Brevo] Connection error: {exc}")
 
-    except Exception as exc:
-        print(f"[Gmail SMTP] Email failed: {exc}")
+        try:
+            db.delete(otp_token)
+            db.commit()
+        except Exception:
+            db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Email service is temporarily unavailable. Please try again later.",
+        )
+
+    # --------------------------------------------------------
+    # Validate Brevo response
+    # --------------------------------------------------------
+
+    if response.status_code not in (200, 201):
+        print(
+            "[Brevo] Email failed: "
+            f"status={response.status_code}, "
+            f"response={response.text}"
+        )
 
         try:
             db.delete(otp_token)
@@ -480,7 +540,7 @@ def request_otp(
         )
 
     print(
-        "[Gmail SMTP] Password reset OTP sent successfully "
+        "[Brevo] Password reset OTP sent successfully "
         f"to {email}"
     )
 
