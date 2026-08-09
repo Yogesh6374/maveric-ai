@@ -18,7 +18,7 @@ def _add_column_if_missing(conn, inspector, table_name: str, column_name: str, c
 
 def run_migrations():
     """
-    Run non-destructive SQLite migrations using ALTER TABLE.
+    Run non-destructive SQLite/PostgreSQL migrations using ALTER TABLE.
     FIXED: Extended to cover ALL tables, not just 'users'.
     Never drops tables. Never deletes data.
     """
@@ -28,30 +28,35 @@ def run_migrations():
     Base.metadata.create_all(bind=engine)
 
     inspector = inspect(engine)
+    is_postgres = engine.dialect.name == "postgresql"
+
+    # Dialect-aware types
+    datetime_type = "TIMESTAMP" if is_postgres else "DATETIME"
+    boolean_default_false = "BOOLEAN DEFAULT FALSE" if is_postgres else "BOOLEAN DEFAULT 0"
 
     with engine.connect() as conn:
         # ── users ─────────────────────────────────────────────────────────────
         _add_column_if_missing(conn, inspector, "users", "password_hash", "VARCHAR")
         _add_column_if_missing(conn, inspector, "users", "google_id", "VARCHAR")
         _add_column_if_missing(conn, inspector, "users", "profile_photo", "VARCHAR")
-        _add_column_if_missing(conn, inspector, "users", "updated_at", "DATETIME")
+        _add_column_if_missing(conn, inspector, "users", "updated_at", datetime_type)
 
         # ── conversations ─────────────────────────────────────────────────────
         _add_column_if_missing(conn, inspector, "conversations", "title", "VARCHAR DEFAULT 'New Chat'")
-        _add_column_if_missing(conn, inspector, "conversations", "updated_at", "DATETIME")
+        _add_column_if_missing(conn, inspector, "conversations", "updated_at", datetime_type)
 
-        # ── chat_messages ─────────────────────────────────────────────────────
-        _add_column_if_missing(conn, inspector, "chat_messages", "type", "VARCHAR DEFAULT 'text'")
-        _add_column_if_missing(conn, inspector, "chat_messages", "file_path", "VARCHAR")
-        _add_column_if_missing(conn, inspector, "chat_messages", "file_name", "VARCHAR")
-        _add_column_if_missing(conn, inspector, "chat_messages", "voice_duration", "VARCHAR")
-        _add_column_if_missing(conn, inspector, "chat_messages", "image_url", "VARCHAR")
-        _add_column_if_missing(conn, inspector, "chat_messages", "model_used", "VARCHAR")
-        _add_column_if_missing(conn, inspector, "chat_messages", "like_status", "INTEGER")
+        # ── messages ─────────────────────────────────────────────────────
+        _add_column_if_missing(conn, inspector, "messages", "type", "VARCHAR DEFAULT 'text'")
+        _add_column_if_missing(conn, inspector, "messages", "file_path", "VARCHAR")
+        _add_column_if_missing(conn, inspector, "messages", "file_name", "VARCHAR")
+        _add_column_if_missing(conn, inspector, "messages", "voice_duration", "VARCHAR")
+        _add_column_if_missing(conn, inspector, "messages", "image_url", "VARCHAR")
+        _add_column_if_missing(conn, inspector, "messages", "model_used", "VARCHAR")
+        _add_column_if_missing(conn, inspector, "messages", "like_status", "INTEGER")
 
         # ── otp_tokens ────────────────────────────────────────────────────────
-        _add_column_if_missing(conn, inspector, "otp_tokens", "is_used", "BOOLEAN DEFAULT 0")
-        _add_column_if_missing(conn, inspector, "otp_tokens", "expires_at", "DATETIME")
+        _add_column_if_missing(conn, inspector, "otp_tokens", "is_used", boolean_default_false)
+        _add_column_if_missing(conn, inspector, "otp_tokens", "expires_at", datetime_type)
 
         conn.commit()
 

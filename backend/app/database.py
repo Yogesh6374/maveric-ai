@@ -5,6 +5,10 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 # Allow DB path override via environment variable
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./chat.db")
 
+# Render uses postgres:// instead of postgresql://
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
 _connect_args = {}
 if DATABASE_URL.startswith("sqlite"):
     _connect_args = {"check_same_thread": False}
