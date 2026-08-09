@@ -18,36 +18,10 @@ router = APIRouter(
 
 
 # ============================================================
-# OTP RATE LIMITING
+# MISC CONFIGURATION
 # ============================================================
 
-_otp_attempts: dict[str, list[datetime]] = {}
-_OTP_MAX_PER_HOUR = 5
-
 _DEBUG = os.getenv("DEBUG", "false").lower() == "true"
-
-
-def _check_otp_rate_limit(email: str) -> None:
-    """
-    Limit password-reset OTP requests to 5 per hour per email.
-    """
-
-    now = datetime.utcnow()
-    window = now - timedelta(hours=1)
-
-    attempts = [
-        t
-        for t in _otp_attempts.get(email, [])
-        if t > window
-    ]
-
-    if len(attempts) >= _OTP_MAX_PER_HOUR:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many OTP requests. Please wait before trying again.",
-        )
-
-    _otp_attempts[email] = attempts + [now]
 
 
 # ============================================================
@@ -289,18 +263,13 @@ def request_otp(
     email = request.email.strip().lower()
 
     # --------------------------------------------------------
-    # Rate limiting
-    # --------------------------------------------------------
-
-    _check_otp_rate_limit(email)
-
-    # --------------------------------------------------------
-    # Check account
+    # Atomic User Lock (Protects against race conditions)
     # --------------------------------------------------------
 
     user = (
         db.query(models.User)
         .filter(models.User.email == email)
+        .with_for_update()
         .first()
     )
 
@@ -311,11 +280,42 @@ def request_otp(
         )
 
     # --------------------------------------------------------
+    # Rate limiting
+    # --------------------------------------------------------
+    
+    now = datetime.utcnow()
+    window = now - timedelta(hours=24)
+
+    recent_tokens = (
+        db.query(models.OTPToken)
+        .filter(models.OTPToken.email == email, models.OTPToken.created_at >= window)
+        .order_by(models.OTPToken.created_at.desc())
+        .all()
+    )
+
+    if recent_tokens:
+        last_token = recent_tokens[0]
+        cooldown_remaining = 60 - (now - last_token.created_at).total_seconds()
+        if cooldown_remaining > 0:
+            remaining_seconds = int(cooldown_remaining)
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Please wait {remaining_seconds} seconds before requesting another OTP.",
+                headers={"Retry-After": str(remaining_seconds)},
+            )
+
+    if len(recent_tokens) >= 5:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Daily password reset OTP limit reached. Please try again later.",
+        )
+
+    # --------------------------------------------------------
     # Generate OTP
     # --------------------------------------------------------
 
     otp_code = auth.generate_otp(6)
-    expires_at = datetime.utcnow() + timedelta(minutes=10)
+    expires_at = now + timedelta(minutes=10)
 
     # --------------------------------------------------------
     # Store OTP
@@ -326,6 +326,7 @@ def request_otp(
         otp_code=otp_code,
         expires_at=expires_at,
         is_used=False,
+        created_at=now,
     )
 
     db.add(otp_token)
